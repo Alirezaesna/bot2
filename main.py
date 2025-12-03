@@ -18,7 +18,7 @@ from telegram.error import BadRequest
 # ==========================================
 
 # 1. توکن جدید را اینجا قرار دهید
-TOKEN = "YOUR_NEW_TOKEN_HERE"
+TOKEN = "7579481172:AAH3TPAeUJQizs5LAcNee0Bb1pq5UUnqFlI"
 
 # 2. آیدی عددی ادمین‌ها
 ADMIN_IDS = [5231734946, 7845217738]
