@@ -1,168 +1,233 @@
 import logging
 import time
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, MessageHandler, CallbackQueryHandler, filters
+from telegram.constants import ParseMode
+from telegram.ext import (
+    ApplicationBuilder,
+    ContextTypes,
+    CommandHandler,
+    MessageHandler,
+    CallbackQueryHandler,
+    ConversationHandler,
+    filters,
+)
 from telegram.error import BadRequest
 
-# --- تنظیمات پیکربندی ---
-# توکن جدید خود را اینجا قرار دهید
-TOKEN = "7579481172:AAH3TPAeUJQizs5LAcNee0Bb1pq5UUnqFlI" 
+# ==========================================
+# ⚙️ تنظیمات ربات (این بخش را ویرایش کنید)
+# ==========================================
 
-# آیدی کانال (حتما باید ربات در این کانال ادمین باشد تا بتواند عضویت را چک کند)
-CHANNEL_USERNAME = "@Bikalammusicworld"
+# 1. توکن جدید را اینجا قرار دهید
+TOKEN = "YOUR_NEW_TOKEN_HERE"
 
-# لیست آیدی ادمین‌ها
+# 2. آیدی عددی ادمین‌ها
 ADMIN_IDS = [5231734946, 7845217738]
 
-# تنظیمات آنتی اسپم (حداکثر 1 پیام در هر 2 ثانیه)
-SPAM_LIMIT_SECONDS = 10
-user_last_message_time = {}
+# 3. آیدی کانال (برای قفل عضویت اجباری)
+# نکته: ربات باید در این کانال ادمین باشد
+CHANNEL_ID = "@Bikalammusicworld"
 
-# لاگینگ برای دیباگ
+# 4. تنظیمات آنتی اسپم (ثانیه)
+SPAM_THRESHOLD = 2.0
+
+# ==========================================
+# 🔧 تنظیمات داخلی (تغییر ندهید)
+# ==========================================
+
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
+logger = logging.getLogger(__name__)
 
-# --- توابع کمکی ---
+# مراحل گفتگو
+WAITING_INPUT = 1
 
-async def check_subscription(user_id: int, context: ContextTypes.DEFAULT_TYPE) -> bool:
-    """بررسی عضویت کاربر در کانال"""
-    try:
-        member = await context.bot.get_chat_member(chat_id=CHANNEL_USERNAME, user_id=user_id)
-        # وضعیت‌های مورد قبول: سازنده، ادمین، عضو
-        if member.status in ['creator', 'administrator', 'member']:
-            return True
-    except BadRequest:
-        logging.warning(f"ربات هنوز در کانال {CHANNEL_USERNAME} ادمین نیست یا کانال اشتباه است.")
-        return False # فرض بر عدم عضویت در صورت خطا
-    except Exception as e:
-        logging.error(f"Error checking subscription: {e}")
-    return False
+# حافظه موقت آنتی اسپم
+user_last_msg = {}
+
+# ==========================================
+# 🛡️ توابع کمکی و امنیتی
+# ==========================================
 
 def is_spam(user_id: int) -> bool:
-    """بررسی نرخ ارسال پیام برای جلوگیری از اسپم"""
+    """بررسی می‌کند آیا کاربر در حال ارسال رگباری پیام است یا خیر"""
     current_time = time.time()
-    last_time = user_last_message_time.get(user_id, 0)
+    last_time = user_last_msg.get(user_id, 0)
     
-    if current_time - last_time < SPAM_LIMIT_SECONDS:
+    if (current_time - last_time) < SPAM_THRESHOLD:
         return True
     
-    user_last_message_time[user_id] = current_time
+    user_last_msg[user_id] = current_time
     return False
 
-# --- هندلرها ---
+async def check_subscription(user_id: int, bot) -> bool:
+    """بررسی عضویت اجباری کاربر در کانال"""
+    try:
+        member = await bot.get_chat_member(chat_id=CHANNEL_ID, user_id=user_id)
+        # وضعیت‌های Left و Kicked یعنی کاربر عضو نیست
+        if member.status in ['left', 'kicked']:
+            return False
+        return True
+    except BadRequest:
+        # اگر ربات در کانال ادمین نباشد یا آیدی کانال غلط باشد، لاگ می‌اندازد
+        # اما برای اینکه ربات از کار نیفتد، موقتا اجازه عبور می‌دهد
+        logger.warning(f"⚠️ ربات هنوز در کانال {CHANNEL_ID} ادمین نیست.")
+        return True 
+    except Exception as e:
+        logger.error(f"Error checking subscription: {e}")
+        return True
+
+async def get_main_menu():
+    """کیبورد منوی اصلی"""
+    keyboard = [
+        [
+            InlineKeyboardButton("🎵 درخواست موزیک", callback_data='req_music'),
+            InlineKeyboardButton("📩 انتقاد و پیشنهاد", callback_data='feedback')
+        ],
+        [
+            InlineKeyboardButton("📢 کانال ما", url=f"https://t.me/{CHANNEL_ID.replace('@', '')}")
+        ]
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+# ==========================================
+# 🎮 هندلرها (Logic)
+# ==========================================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     
+    # بررسی آنتی اسپم
     if is_spam(user.id):
-        await update.message.reply_text("⛔️ لطفاً پیام‌ها را آرام‌تر ارسال کنید.")
-        return
+        return 
 
     # بررسی عضویت اجباری
-    is_member = await check_subscription(user.id, context)
-    if not is_member:
-        keyboard = [[InlineKeyboardButton("عضویت در کانال 🎵", url=f"https://t.me/{CHANNEL_USERNAME.replace('@', '')}")],
-                    [InlineKeyboardButton("عضو شدم ✅", callback_data="check_join")]]
-        reply_markup = InlineKeyboardMarkup(keyboard)
+    if not await check_subscription(user.id, context.bot):
+        keyboard = [
+            [InlineKeyboardButton("عضویت در کانال 🎵", url=f"https://t.me/{CHANNEL_ID.replace('@', '')}")],
+            [InlineKeyboardButton("✅ عضو شدم", callback_data="check_join")]
+        ]
         await update.message.reply_text(
             f"سلام {user.first_name} عزیز! 👋\n\n"
-            f"برای استفاده از ربات، ابتدا باید در کانال موسیقی ما عضو شوید.",
-            reply_markup=reply_markup
+            f"🔒 برای استفاده از ربات، ابتدا باید در کانال **{CHANNEL_ID}** عضو شوید.",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode=ParseMode.MARKDOWN
         )
-        return
+        return ConversationHandler.END
 
-    # نمایش منوی اصلی
-    keyboard = [
-        [InlineKeyboardButton("🎹 درخواست موزیک", callback_data='req_music')],
-        [InlineKeyboardButton("📩 انتقادات و پیشنهادات", callback_data='feedback')]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
     await update.message.reply_text(
-        "به ربات موزیک خوش آمدید! 🎧\nلطفاً یک گزینه را انتخاب کنید:",
-        reply_markup=reply_markup
+        "🎧 **به ربات موزیک خوش آمدید**\n\n"
+        "چه کاری می‌توانم برایتان انجام دهم؟",
+        reply_markup=await get_main_menu(),
+        parse_mode=ParseMode.MARKDOWN
     )
+    return ConversationHandler.END
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    user_id = query.from_user.id
+    user = query.from_user
 
     # دکمه بررسی عضویت
     if query.data == "check_join":
-        is_member = await check_subscription(user_id, context)
-        if is_member:
-            await query.message.delete() # حذف پیام قفل عضویت
-            await start(update, context) # نمایش منوی اصلی
+        if await check_subscription(user.id, context.bot):
+            await query.message.delete()
+            await start(update, context)
         else:
-            await query.answer("❌ شما هنوز عضو کانال نشده‌اید!", show_alert=True)
-        return
-
-    # سایر دکمه‌ها
-    if query.data == 'req_music':
-        context.user_data['state'] = 'WAITING_MUSIC'
-        await query.edit_message_text("🎵 لطفاً نام آهنگ، خواننده یا بخشی از متن موزیک درخواستی خود را بنویسید:")
-    
-    elif query.data == 'feedback':
-        context.user_data['state'] = 'WAITING_FEEDBACK'
-        await query.edit_message_text("✍️ لطفاً انتقاد یا پیشنهاد خود را ارسال کنید:")
-
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    text = update.message.text
-    state = context.user_data.get('state')
+            await query.answer("❌ هنوز عضو کانال نشده‌اید!", show_alert=True)
+        return ConversationHandler.END
 
     if is_spam(user.id):
-        return # نادیده گرفتن پیام‌های رگباری
+        await query.answer("⚠️ لطفاً آرام‌تر!", show_alert=True)
+        return ConversationHandler.END
 
-    # اگر کاربر وضعیتی ندارد (روی دکمه‌ها کلیک نکرده)
-    if not state:
-        await start(update, context)
-        return
+    # مدیریت منوها
+    msg_text = ""
+    if query.data == 'req_music':
+        msg_text = "🎹 **درخواست موزیک**\n\nلطفاً نام آهنگ، خواننده یا بخشی از متن را ارسال کنید:"
+        context.user_data['type'] = 'درخواست موزیک 🎵'
+    
+    elif query.data == 'feedback':
+        msg_text = "✍️ **انتقاد یا پیشنهاد**\n\nپیام خود را بنویسید تا به دست ادمین‌ها برسد:"
+        context.user_data['type'] = 'فیدبک 📩'
 
-    # بررسی مجدد عضویت قبل از انجام عملیات
-    if not await check_subscription(user.id, context):
-        await start(update, context)
-        return
+    # دکمه بازگشت
+    cancel_kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data='cancel')]])
+    
+    await query.edit_message_text(text=msg_text, reply_markup=cancel_kb, parse_mode=ParseMode.MARKDOWN)
+    return WAITING_INPUT
 
-    # آماده‌سازی گزارش برای ادمین‌ها
-    msg_type = "نامشخص"
-    if state == 'WAITING_MUSIC':
-        msg_type = "🎵 درخواست موزیک"
-        response_text = "✅ درخواست موزیک شما ثبت شد و به ادمین‌ها ارسال گردید."
-    elif state == 'WAITING_FEEDBACK':
-        msg_type = "📩 پیشنهاد/انتقاد"
-        response_text = "✅ پیام شما دریافت شد. ممنون از نظرات شما!"
+async def handle_user_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    text = update.message.text
+    msg_type = context.user_data.get('type', 'پیام')
 
+    if is_spam(user.id):
+        await update.message.reply_text("⛔️ لطفاً پیام‌ها را با فاصله زمانی ارسال کنید.")
+        return WAITING_INPUT
+
+    # ساخت متن گزارش برای ادمین
     admin_report = (
-        f"⚠️ **پیام جدید** ({msg_type})\n\n"
-        f"👤 کاربر: {user.first_name} (ID: `{user.id}`)\n"
-        f"🆔 یوزرنیم: @{user.username if user.username else 'ندارد'}\n\n"
-        f"📝 متن پیام:\n{text}"
+        f"🔔 **پیام جدید: {msg_type}**\n"
+        f"➖➖➖➖➖➖➖➖\n"
+        f"👤 نام: {user.first_name}\n"
+        f"🔢 آیدی عددی: `{user.id}`\n"
+        f"🆔 یوزرنیم: @{user.username if user.username else 'ندارد'}\n"
+        f"➖➖➖➖➖➖➖➖\n\n"
+        f"📝 **متن پیام:**\n{text}"
     )
 
-    # ارسال برای ادمین‌ها
+    # ارسال برای همه ادمین‌ها
     for admin_id in ADMIN_IDS:
         try:
-            await context.bot.send_message(chat_id=admin_id, text=admin_report, parse_mode='Markdown')
+            await context.bot.send_message(chat_id=admin_id, text=admin_report, parse_mode=ParseMode.MARKDOWN)
         except Exception as e:
-            logging.error(f"نمیتوان پیام را به ادمین {admin_id} فرستاد. خطا: {e}")
+            logger.error(f"خطا در ارسال به ادمین {admin_id}: {e}")
 
-    # پاک کردن وضعیت کاربر و پاسخ به او
-    context.user_data['state'] = None
-    await update.message.reply_text(response_text)
-    
-    # بازگشت به منوی اصلی
-    time.sleep(1)
-    await start(update, context)
+    # تاییدیه به کاربر
+    await update.message.reply_text(
+        "✅ پیام شما با موفقیت دریافت و برای مدیران ارسال شد.",
+        reply_markup=await get_main_menu()
+    )
+    return ConversationHandler.END
+
+async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    await query.edit_message_text(
+        "🏠 بازگشت به منوی اصلی:",
+        reply_markup=await get_main_menu()
+    )
+    return ConversationHandler.END
+
+# ==========================================
+# 🚀 اجرای ربات
+# ==========================================
 
 if __name__ == '__main__':
+    if TOKEN == "YOUR_NEW_TOKEN_HERE":
+        print("❌ خطا: لطفاً توکن ربات را در خط 16 فایل جایگذاری کنید.")
+        exit()
+
     application = ApplicationBuilder().token(TOKEN).build()
 
-    application.add_handler(CommandHandler('start', start))
-    application.add_handler(CallbackQueryHandler(button_handler))
-    application.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_message))
+    # مدیریت مراحل گفتگو
+    conv_handler = ConversationHandler(
+        entry_points=[CallbackQueryHandler(button_handler, pattern='^(req_music|feedback|check_join)$')],
+        states={
+            WAITING_INPUT: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, handle_user_input),
+                CallbackQueryHandler(cancel, pattern='^cancel$')
+            ],
+        },
+        fallbacks=[CommandHandler('start', start)]
+    )
 
-    print("Bot is running...")
+    application.add_handler(CommandHandler('start', start))
+    application.add_handler(conv_handler)
+    # هندلر جداگانه برای دکمه "عضو شدم" در صورتی که خارج از استیت باشد
+    application.add_handler(CallbackQueryHandler(button_handler, pattern='^check_join$'))
+
+    print("✅ ربات با موفقیت روشن شد...")
     application.run_polling()
